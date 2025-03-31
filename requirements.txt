@@ -1,0 +1,10 @@
+datasets
+ipywidgets
+matplotlib
+numpy
+pillow
+plotly
+pycolmap
+scipy
+trimesh
+webdataset
