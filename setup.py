@@ -28,7 +28,7 @@ except FileNotFoundError:
 setup(name='hoho2025',
 	version='0.1.0',
 	description='Tools and utilites for the HoHo Dataset and S23DR Competition',
-	url='usm3d.github.io',
+	url='https://github.com/s23dr/hoho2025',
 	author='Jack Langerman, Dmytro Mishkin, S23DR Orgainizing Team',
 	author_email='hoho@jackml.com',
 	install_requires=required,
