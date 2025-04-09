@@ -7,7 +7,7 @@ Tools and utilities for the [S23DR-2025 competition](https://huggingface.co/spac
 
 ## Installation 
 
-```
+```bash
 pip install hoho2025
 ```
 
