@@ -1,5 +1,3 @@
-import numpy as np 
-
 gestalt_color_mapping = {
     "unclassified": (215, 62, 138),
     "apex": (235, 88, 48),
@@ -185,22 +183,27 @@ ade20k_color_mapping = {
 }
 
 
-# edge_colors = np.asarray([(214, 251, 248),
-#                           (13, 94, 47),
-#                           (54, 243, 63),
-#                           (187, 123, 236),
-#                           (162, 162, 32),
-#                           (169, 255, 219),
-#                           (8, 89, 52),
-#                           (85, 27, 65),
-#                           (0, 0, 0)]
+EDGE_CLASSES = {'cornice_return': 0,
+                'cornice_strip': 1,
+                'eave': 2,
+                'flashing': 3,
+                'hip': 4,
+                'rake': 5,
+                'ridge': 6,
+                'step_flashing': 7,
+                'transition_line': 8,
+                'valley': 9}
+EDGE_CLASSES_BY_ID = {v: k for k, v in EDGE_CLASSES.items()}
 
-
-# edge_colors = np.array([[ 54, 243,  63], 
-#                         [214, 251, 248], 
-#                         [169, 255, 219], 
-#                         [ 13,  94,  47], 
-#                         [162, 162,  32], 
-#                         [187, 123, 236], 
-#                         [ 85,  27,  65], 
-#                         [  0,  0,    0]])
+edge_color_mapping = {
+    'cornice_return': (215, 62, 138),
+    'cornice_strip': (235, 88, 48),
+    'eave':  (54, 243, 63),
+    "flashing": (162, 162, 32),
+    'hip': (8, 89, 52),
+    'rake': (13, 94, 47),
+    'ridge': (214, 251, 248),
+    "step_flashing": (169, 255, 219),
+    'transition_line': (200,0,50),
+    'valley': (85, 27, 65),
+}

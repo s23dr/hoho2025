@@ -1,9 +1,44 @@
+
+import matplotlib.pyplot as plt
 import trimesh
 import numpy as np
 from copy import deepcopy
 from PIL import Image
 
 from . import color_mappings
+
+
+def plot_all_modalities(ds_entry, figsize=(8, 15)):
+    modalities_to_plot = ['images', 'depth', 'gestalt', 'ade']
+    modalities_in_entry = [k for k in ds_entry.keys() if k in modalities_to_plot and len(ds_entry[k]) > 0]
+    number_of_columns = len(modalities_in_entry)
+    number_of_images = len(ds_entry['image_ids'])
+    number_of_rows = number_of_images
+    fig, axes = plt.subplots(number_of_rows, number_of_columns, figsize=figsize)
+    for i in range(len(ds_entry[modalities_in_entry[0]])):
+        for j, modality in enumerate(modalities_in_entry):
+            ax = axes[i, j]
+            if modality == 'image':
+                ax.imshow(ds_entry[modality][i])
+            elif modality == 'depth':
+                depth_image = np.array(ds_entry[modality][i])/1000.0
+                ax.imshow(depth_image, cmap='rainbow')
+            elif modality == 'gestalt':
+                ax.imshow(ds_entry[modality][i])
+            elif modality == 'ade':
+                ax.imshow(ds_entry[modality][i])
+            else:
+                raise ValueError(f"Unknown modality: {modality}")
+            if i == 0:
+                ax.set_title(modality)
+            ax.axis('off')
+            if j == 0:
+                ax.set_ylabel(f"Image {i}")
+    fig.tight_layout()  
+    fig.subplots_adjust(wspace=0.05, hspace=0.01)
+    #plt.show()
+    return fig, axes
+
 
 def line(p1, p2, c=(255,0,0), resolution=10, radius=0.05):
     '''draws a 3d cylinder along the line (p1, p2)'''
@@ -114,8 +149,6 @@ def show_grid(edges, meshes=None, row_length=5):
     return trimesh.Scene(out)
 
 
-
-
 def visualize_order_images(row_order):
     return create_image_grid(row_order['ade20k'] + row_order['gestalt'] + [visualize_depth(dm) for dm in row_order['depthcm']], num_per_row=len(row_order['ade20k']))
 
@@ -145,8 +178,6 @@ def create_image_grid(images, target_length=312, num_per_row=2):
     
     return grid_img
 
-
-import matplotlib.pyplot as plt
 
 def visualize_depth(depth, min_depth=None, max_depth=None, cmap='rainbow'):
     depth = np.array(depth)

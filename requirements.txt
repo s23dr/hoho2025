@@ -1,10 +1,14 @@
 datasets
+huggingface-hub
 ipywidgets
 matplotlib
 numpy
-pillow
+opencv-python
+Pillow
 plotly
 pycolmap
 scipy
+torch
 trimesh
 webdataset
+manifold3d # for metric computation

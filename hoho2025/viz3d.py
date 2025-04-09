@@ -1,4 +1,3 @@
-
 """
 Copyright [2022] [Paul-Edouard Sarlin and Philipp Lindenberger]
 
@@ -21,58 +20,23 @@ Works for a small number of points and cameras, might be slow otherwise.
 2) Add 3D points, camera frustums, or both as a pycolmap.Reconstruction
 
 Written by Paul-Edouard Sarlin and Philipp Lindenberger.
+Slightly modified by Dmytro Mishkin
 """
-# Slightly modified by Dmytro Mishkin
-
 from typing import Optional
 import numpy as np
 import pycolmap
 import plotly.graph_objects as go
-
-
-### Some helper functions for geometry
-def qvec2rotmat(qvec):
-    return np.array([
-        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
-         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
-         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
-        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
-         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
-         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
-        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
-         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
-         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
-
+from hoho2025.color_mappings import edge_color_mapping, EDGE_CLASSES_BY_ID
 
 def to_homogeneous(points):
     pad = np.ones((points.shape[:-1]+(1,)), dtype=points.dtype)
     return np.concatenate([points, pad], axis=-1)
 
-def t_to_proj_center(qvec, tvec):
-    Rr = qvec2rotmat(qvec)
-    tt = (-Rr.T) @ tvec
-    return tt
-
-def calib(params):
-    out = np.eye(3)
-    if len(params) == 3:
-        out[0,0] = params[0]
-        out[1,1] = params[0]
-        out[0,2] = params[1]
-        out[1,2] = params[2]
-    else:
-        out[0,0] = params[0]
-        out[1,1] = params[1]
-        out[0,2] = params[2]
-        out[1,2] = params[3]
-    return out
-
-
 ### Plotting functions
 
 def init_figure(height: int = 800) -> go.Figure:
     """Initialize a 3D figure."""
-    fig = go.Figure()
+    fig = go.FigureWidget()
     axes = dict(
         visible=False,
         showbackground=False,
@@ -118,9 +82,14 @@ def plot_lines_3d(
     x = pts[..., 0]
     y = pts[..., 1]
     z = pts[..., 2]
-    traces = [go.Scatter3d(x=x1, y=y1, z=z1,
+    if isinstance(color, list):
+        traces = [go.Scatter3d(x=x1, y=y1, z=z1,
+                            mode='lines',
+                            line=dict(color=f"rgb{c}", width=ps)) for x1, y1, z1, c in zip(x,y,z,color)]
+    else:
+        traces = [go.Scatter3d(x=x1, y=y1, z=z1,
                         mode='lines',
-                        line=dict(color=color, width=2)) for x1, y1, z1 in zip(x,y,z)]
+                        line=dict(color=color, width=ps)) for x1, y1, z1 in zip(x,y,z)]
     for t in traces:
         fig.add_trace(t)
     fig.update_traces(showlegend=False)
@@ -150,7 +119,11 @@ def plot_camera(
         name: Optional[str] = None,
         legendgroup: Optional[str] = None,
         size: float = 1.0):
-    """Plot a camera frustum from pose and intrinsic matrix."""
+    """Plot a camera frustum from pose and intrinsic matrix. R and t are 
+    world_to_camera transformation"""
+    R = np.array(R)
+    t = np.array(t).reshape(3)
+    K = np.array(K)
     W, H = K[0, 2]*2, K[1, 2]*2
     corners = np.array([[0, 0], [W, 0], [W, H], [0, H], [0, 0]])
     if size is not None:
@@ -197,106 +170,118 @@ def plot_camera_colmap(
         name: Optional[str] = None,
         **kwargs):
     """Plot a camera frustum from PyCOLMAP objects"""
-    intr = calib(camera.params)
-    if intr[0][0] > 10000:
+    # Use camera intrinsics method if available, otherwise fallback to params
+    intr = camera.calibration_matrix()
+    if intr[0][0] > 5000:
         print("Bad camera")
         return
+    world_t_camera = image.cam_from_world.inverse()
     plot_camera(
         fig,
-        qvec2rotmat(image.qvec).T,
-        t_to_proj_center(image.qvec, image.tvec),
-        intr,#calibration_matrix(),
-        name=name or str(image.id),
+        world_t_camera.rotation.matrix(),  # Use rotation matrix method (World-to-Camera)
+        world_t_camera.translation,  # Use camera center in world coordinates
+        intr,
+        name=name or str(image.name),
         **kwargs)
 
 
 def plot_cameras(
         fig: go.Figure,
-        reconstruction,#: pycolmap.Reconstruction,
+        reconstruction: pycolmap.Reconstruction, # Added type hint
         **kwargs):
     """Plot a camera as a cone with camera frustum."""
-    for image_id, image in reconstruction["images"].items():
+    # Iterate over reconstruction.images
+    for image_id, image in reconstruction.images.items():
+        # Access camera using reconstruction.cameras
         plot_camera_colmap(
-            fig, image, reconstruction["cameras"][image.camera_id], **kwargs)
+            fig, image, reconstruction.cameras[image.camera_id], **kwargs)
 
 
 def plot_reconstruction(
         fig: go.Figure,
-        rec,
+        rec: pycolmap.Reconstruction, # Added type hint
         color: str = 'rgb(0, 0, 255)',
         name: Optional[str] = None,
         points: bool = True,
         cameras: bool = True,
         cs: float = 1.0,
         single_color_points=False,
-        camera_color='rgba(0, 255, 0, 0.5)'):
-    # rec is result of loading reconstruction from "read_write_colmap.py"
+        camera_color='rgba(0, 255, 0, 0.5)',
+        crop_outliers: bool = False):
+    # rec is a pycolmap.Reconstruction object
     # Filter outliers
     xyzs = []
     rgbs = []
-    for k, p3D in rec['points'].items():
+    # Iterate over rec.points3D
+    for k, p3D in rec.points3D.items():
+        #print (p3D)
         xyzs.append(p3D.xyz)
-        rgbs.append(p3D.rgb)
+        rgbs.append(p3D.color)
+    
+    xyzs = np.array(xyzs)
+    rgbs = np.array(rgbs)
+    
+    # Crop outliers if requested
+    if crop_outliers and len(xyzs) > 0:
+        # Calculate distances from origin
+        distances = np.linalg.norm(xyzs, axis=1)
+        # Find threshold at 98th percentile (removing 2% furthest points)
+        threshold = np.percentile(distances, 98)
+        # Filter points
+        mask = distances <= threshold
+        xyzs = xyzs[mask]
+        rgbs = rgbs[mask]
+        print(f"Cropped outliers: removed {np.sum(~mask)} out of {len(mask)} points ({np.sum(~mask)/len(mask)*100:.2f}%)")
 
-    if points:
-        plot_points(fig, np.array(xyzs), color=color if single_color_points else np.array(rgbs), ps=1, name=name)
+    if points and len(xyzs) > 0:
+        plot_points(fig, xyzs, color=color if single_color_points else rgbs, ps=1, name=name)
     if cameras:
         plot_cameras(fig, rec, color=camera_color, legendgroup=name, size=cs)
 
-
-def plot_pointcloud(
+def plot_wireframe(
         fig: go.Figure,
-        pts: np.ndarray,
-        colors: np.ndarray,
-        ps: int = 2,
-        name: Optional[str] = None):
-    """Plot a set of 3D points."""
-    plot_points(fig, np.array(pts), color=colors, ps=ps, name=name)
-
-
-def plot_triangle_mesh(
-        fig: go.Figure,
-        vert: np.ndarray,
-        colors: np.ndarray,
-        triangles: np.ndarray,
-        name: Optional[str] = None):
-    """Plot a triangle mesh."""
-    tr = go.Mesh3d(
-        x=vert[:,0],
-        y=vert[:,1],
-        z=vert[:,2],
-        vertexcolor = np.clip(255*colors, 0, 255),
-        # i, j and k give the vertices of triangles
-        # here we represent the 4 triangles of the tetrahedron surface
-        i=triangles[:,0],
-        j=triangles[:,1],
-        k=triangles[:,2],
-        name=name,
-        showscale=False
-    )
-    fig.add_trace(tr)
-
-def plot_estimate_and_gt(pred_vertices, pred_connections, gt_vertices=None, gt_connections=None):
-    fig3d = init_figure()
-    c1 = (30, 20, 255)
-    img_color = [c1 for _ in range(len(pred_vertices))]
-    plot_points(fig3d, pred_vertices, color = img_color, ps = 10)  
-    lines = []
-    for c in pred_connections:
-        v1 = pred_vertices[c[0]]
-        v2 = pred_vertices[c[1]]
-        lines.append(np.stack([v1, v2], axis=0))
-    plot_lines_3d(fig3d, np.array(lines), img_color, ps=4)  
+        vertices: np.ndarray,
+        edges: np.ndarray,
+        classifications: np.ndarray = None,
+        color: str = 'rgb(0, 0, 255)',
+        name: Optional[str] = None,
+        **kwargs):
+    """Plot a camera as a cone with camera frustum."""
+    gt_vertices = np.array(vertices)
+    gt_connections = np.array(edges)
     if gt_vertices is not None:
-        c2 = (30, 255, 20)
-        img_color2 = [c2 for _ in range(len(gt_vertices))]
-        plot_points(fig3d, gt_vertices, color = img_color2, ps = 10)  
+        img_color2 = [color for _ in range(len(gt_vertices))]
+        plot_points(fig, gt_vertices, color = img_color2, ps = 10)  
         if gt_connections is not None:
             gt_lines = []
             for c in gt_connections:
                 v1 = gt_vertices[c[0]]
                 v2 = gt_vertices[c[1]]
                 gt_lines.append(np.stack([v1, v2], axis=0))
-        plot_lines_3d(fig3d, np.array(gt_lines), img_color2, ps=4)        
-    fig3d.show()
-    return fig3d
+            if classifications is not None and len(classifications) == len(gt_lines):
+                line_colors = []
+                for c in classifications:
+                    line_colors.append(edge_color_mapping[EDGE_CLASSES_BY_ID[c]])
+                plot_lines_3d(fig, np.array(gt_lines), line_colors, ps=4)  
+            else:
+                plot_lines_3d(fig, np.array(gt_lines), color, ps=4)  
+
+
+def plot_bpo_cameras_from_entry(fig: go.Figure, entry: dict, idx = None):
+    def cam2world_to_world2cam(R, t):
+        rt = np.eye(4)
+        rt[:3,:3] = R
+        rt[:3,3] = t.reshape(-1)
+        rt = np.linalg.inv(rt)
+        return rt[:3,:3], rt[:3,3]
+    
+    for i in range(len(entry['R'])):
+        if idx is not None and i != idx:
+            continue
+        K = np.array(entry['K'][i])
+        R = np.array(entry['R'][i])
+        t = np.array(entry['t'][i])
+        R, t = cam2world_to_world2cam(R, t)
+        plot_camera(fig, R, t, K)
+    
+    

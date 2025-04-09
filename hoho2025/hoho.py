@@ -13,6 +13,7 @@ import numpy as np
 import importlib
 import subprocess
 
+
 from PIL import ImageFile
 
 from huggingface_hub.utils._headers import build_hf_headers # note: using _headers
@@ -184,8 +185,9 @@ def proc(row, split='train'):
     return Sample(out)
 
 
-from . import read_write_colmap
+
 def decode_colmap(s):
+    import hoho2025.read_write_colmap as read_write_colmap
     with temp_working_directory():
 
         with open('points3D.bin', 'wb') as stream:
