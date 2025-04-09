@@ -7,6 +7,10 @@ Tools and utilities for the [S23DR-2025 competition](https://huggingface.co/spac
 
 ## Installation 
 
+```
+pip install hoho2025
+```
+
 ### pip install over http
 ```bash
 pip install git+http://hf.co/usm3d/tools2025.git    
