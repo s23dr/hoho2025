@@ -23,7 +23,12 @@ cd tools2025
 pip install -e .
 ```
 
-### Usage example
+
+
+### Usage example 2026
+
+
+See in [notebook](notebooks/example_2026.ipynb)
 
 ```python
 from datasets import load_dataset
@@ -41,7 +46,7 @@ def read_colmap_rec(colmap_data):
         rec = pycolmap.Reconstruction(tmpdir)
         return rec
 
-ds = load_dataset("usm3d/hoho25k", streaming=True, trust_remote_code=True)
+ds = load_dataset("usm3d/hoho22k_2026_trainval", streaming=True, trust_remote_code=True)
 for a in ds['train']:
     break
 
@@ -50,7 +55,7 @@ fig, ax = plot_all_modalities(a)
 ## Now 3d
 
 fig3d = init_figure()
-plot_reconstruction(fig3d, read_colmap_rec(a['colmap_binary']))
+plot_reconstruction(fig3d, read_colmap_rec(a['colmap']))
 plot_wireframe(fig3d, a['wf_vertices'], a['wf_edges'], a['wf_classifications'])
 plot_bpo_cameras_from_entry(fig3d, a)
 fig3d
@@ -65,7 +70,7 @@ from hoho2025.example_solutions import predict_wireframe
 pred_vertices, pred_connections = predict_wireframe(a)
 
 fig3d = init_figure()
-plot_reconstruction(fig3d, read_colmap_rec(a['colmap_binary']))
+plot_reconstruction(fig3d, read_colmap_rec(a['colmap']))
 plot_wireframe(fig3d, pred_vertices, pred_connections, color='rgb(0, 0, 255)')
 fig3d
 ```
@@ -79,3 +84,9 @@ from hoho2025.metric_helper import hss
 score = hss(pred_vertices, pred_connections, a['wf_vertices'], a['wf_edges'], vert_thresh=0.5, edge_thresh=0.5)
 print (score)
 ```
+
+
+
+### Usage example 2025
+
+See in [notebooks](notebooks/example_2025.ipynb)
