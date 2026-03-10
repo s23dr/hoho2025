@@ -26,10 +26,39 @@ def read_colmap_rec(colmap_data):
         rec = pycolmap.Reconstruction(tmpdir)
         return rec
 
+
+def _cam_matrix_from_image(img):
+    """Return (R 3×3, t 3) from a pycolmap.Image, compatible with all pycolmap versions."""
+    cfW = img.cam_from_world
+    try:
+        R = cfW.rotation.matrix()
+        t = cfW.translation
+    except AttributeError:
+        # Older API: matrix() returns 3×4 [R | t]
+        M = np.array(cfW.matrix())
+        R, t = M[:, :3], M[:, 3]
+    return np.array(R, dtype=np.float64), np.array(t, dtype=np.float64)
+
+
+def _colmap_project_point(img, cam, xyz):
+    """Project a 3-D world point into image pixel coordinates.
+
+    Returns ``((u, v), depth_z)`` or ``None`` if the point is behind the camera.
+    Works with any pycolmap version (replaces the removed ``Image.project_point``).
+    """
+    R, t = _cam_matrix_from_image(img)
+    p_cam = R @ np.asarray(xyz, dtype=np.float64) + t
+    if p_cam[2] <= 0:
+        return None
+    K = cam.calibration_matrix()
+    u = p_cam[0] / p_cam[2] * K[0, 0] + K[0, 2]
+    v = p_cam[1] / p_cam[2] * K[1, 1] + K[1, 2]
+    return (u, v), p_cam[2]
+
 def convert_entry_to_human_readable(entry):
     out = {}
     for k, v in entry.items():
-        if 'colmap' in k:
+        if 'colmap' in k and k!= 'pose_only_in_colmap':
             out[k] = read_colmap_rec(v)
         elif k in ['wf_vertices', 'wf_edges', 'K', 'R', 't', 'depth']:
             out[k] = np.array(v)
@@ -272,7 +301,9 @@ def get_uv_depth(vertices: List[dict],
 
 
 
-def project_vertices_to_3d(uv: np.ndarray, depth_vert: np.ndarray, col_img: pycolmap.Image) -> np.ndarray:
+def project_vertices_to_3d(uv: np.ndarray, depth_vert: np.ndarray,
+                           col_img: pycolmap.Image,
+                           colmap_rec: pycolmap.Reconstruction = None) -> np.ndarray:
     """
     Projects 2D vertex coordinates with associated depths to 3D world coordinates.
 
@@ -283,25 +314,40 @@ def project_vertices_to_3d(uv: np.ndarray, depth_vert: np.ndarray, col_img: pyco
     depth_vert : np.ndarray
         (N,) array of depth values for each vertex.
     col_img : pycolmap.Image
+    colmap_rec : pycolmap.Reconstruction, optional
+        Required for newer pycolmap versions where ``Image.camera`` no longer
+        exists.  Ignored if the old ``col_img.camera`` shortcut is available.
 
     Returns
     -------
     vertices_3d : np.ndarray
         (N, 3) array of vertex coordinates in 3D world space.
     """
+    # Obtain camera intrinsics — try the old shortcut first, then fall back to
+    # looking up the camera through the reconstruction.
+    try:
+        K = col_img.camera.calibration_matrix()
+    except AttributeError:
+        if colmap_rec is None:
+            raise AttributeError(
+                "col_img.camera is not available in this pycolmap version. "
+                "Pass colmap_rec to project_vertices_to_3d()."
+            )
+        K = colmap_rec.cameras[col_img.camera_id].calibration_matrix()
+
     # Backproject to 3D local camera coordinates
     xy_local = np.ones((len(uv), 3))
-    K = col_img.camera.calibration_matrix()
     xy_local[:, 0] = (uv[:, 0] - K[0, 2]) / K[0, 0]
     xy_local[:, 1] = (uv[:, 1] - K[1, 2]) / K[1, 1]
-    # Get the 3D vertices
-    vertices_3d_local = xy_local * depth_vert[...,None]
-    
-    # Create camera-to-world transformation matrix
+    vertices_3d_local = xy_local * depth_vert[..., None]
+
+    # Build 4×4 world-to-cam matrix using the version-agnostic helper.
+    R, t = _cam_matrix_from_image(col_img)
     world_to_cam = np.eye(4)
-    world_to_cam[:3] = col_img.cam_from_world.matrix()
+    world_to_cam[:3, :3] = R
+    world_to_cam[:3, 3] = t
     cam_to_world = np.linalg.inv(world_to_cam)
-    
+
     # Transform local 3D points to world coordinates
     vertices_3d_homogeneous = cv2.convertPointsToHomogeneous(vertices_3d_local)
     vertices_3d = cv2.transform(vertices_3d_homogeneous, cam_to_world)
@@ -354,7 +400,7 @@ def create_3d_wireframe_single_image(vertices: List[dict],
     uv, depth_vert = get_uv_depth(vertices, depth_fitted, depth_sparse, 10)
 
     # Backproject to 3D
-    vertices_3d = project_vertices_to_3d(uv, depth_vert, col_img)
+    vertices_3d = project_vertices_to_3d(uv, depth_vert, col_img, colmap_rec=colmap_rec)
 
     return vertices_3d
 
@@ -536,24 +582,19 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth):
     
     points_xyz = np.array(points_xyz)  # (N, 3)
     
-    # 3) For each point, project via col_img.project_point()
+    # 3) Project each 3D point into the image using the version-agnostic helper.
+    cam = colmap_rec.cameras[found_img.camera_id]
     uv = []
     z_vals = []
     for xyz in points_xyz:
-        proj = found_img.project_point(xyz)  # returns (u, v) in image coords or None
-        if proj is not None:
-            u_i, v_i = proj
-            u_i = int(round(u_i))
-            v_i = int(round(v_i))
-            # Check in-bounds
-            if 0 <= u_i < W and 0 <= v_i < H:
-                uv.append((u_i, v_i))
-                # We'll compute depth as Z in camera coords
-                # from the world->cam transform col_img holds
-                mat4x4 = np.eye(4)
-                mat4x4[:3, :4] = found_img.cam_from_world.matrix()
-                p_cam =  mat4x4@ np.array([xyz[0], xyz[1], xyz[2], 1.0])
-                z_vals.append(p_cam[2] / p_cam[3]) 
+        result = _colmap_project_point(found_img, cam, xyz)
+        if result is None:
+            continue
+        (u_f, v_f), depth_z = result
+        u_i, v_i = int(round(u_f)), int(round(v_f))
+        if 0 <= u_i < W and 0 <= v_i < H:
+            uv.append((u_i, v_i))
+            z_vals.append(depth_z)
     
     uv = np.array(uv, dtype=int)     # shape (M,2)
     z_vals = np.array(z_vals)        # shape (M,)
@@ -664,7 +705,10 @@ def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
                                                 good_entry['image_ids'],
                                                 good_entry['ade'] # Added ade20k segmentation
                                                 )):
-        colmap_rec = good_entry['colmap_binary']
+        if 'colmap' in good_entry:
+            colmap_rec = good_entry['colmap']
+        else:
+            colmap_rec = good_entry['colmap_binary']
         K = np.array(K)
         R = np.array(R)
         t = np.array(t)

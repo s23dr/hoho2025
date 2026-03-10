@@ -1,3 +1,4 @@
+# Python >= 3.10 required (see setup.py)
 datasets
 huggingface-hub
 ipywidgets
@@ -6,9 +7,9 @@ numpy
 opencv-python
 Pillow
 plotly
-pycolmap
+pycolmap>=0.6
 scipy
 torch
 trimesh
 webdataset
-manifold3d # for metric computation
+manifold3d  # for metric computation
