@@ -695,9 +695,14 @@ def prune_too_far(all_3d_vertices, connections_3d, colmap_rec, th=3.0):
     Vertices lifted from noisy monocular depth with no nearby COLMAP point are
     likely hallucinations; discarding them improves geometric accuracy.
     """
+    if len(all_3d_vertices) == 0:
+        return np.empty((0, 3)), []
+
     xyz_sfm = []
     for k, v in colmap_rec.points3D.items():
         xyz_sfm.append(v.xyz)
+    if not xyz_sfm:
+        return all_3d_vertices, connections_3d
     xyz_sfm = np.array(xyz_sfm)
     diff = all_3d_vertices[:, None, :] - xyz_sfm[None, :, :]
     mindist = np.sqrt((diff ** 2).sum(axis=-1)).min(axis=1)
@@ -754,9 +759,9 @@ def predict_wireframe(entry, verbose: bool = False) -> Tuple[np.ndarray, List[in
     
     # Merge vertices from all images
     all_3d_vertices, connections_3d = merge_vertices_3d(vert_edge_per_image, 0.5)
-    all_3d_vertices_clean, connections_3d_clean  = prune_not_connected(all_3d_vertices, connections_3d, keep_largest=False)
-    all_3d_vertices_clean, connections_3d_clean  = prune_too_far(all_3d_vertices_clean, connections_3d_clean, colmap_rec, th = 4.0)
-    
+    all_3d_vertices_clean, connections_3d_clean = prune_not_connected(all_3d_vertices, connections_3d, keep_largest=False)
+    all_3d_vertices_clean, connections_3d_clean = prune_too_far(all_3d_vertices_clean, connections_3d_clean, colmap_rec, th=4.0)
+
     if (len(all_3d_vertices_clean) < 2) or len(connections_3d_clean) < 1:
         if verbose:
             print(f'Not enough vertices or connections in the 3D vertices')
