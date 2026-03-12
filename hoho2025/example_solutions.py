@@ -709,6 +709,9 @@ def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
             colmap_rec = good_entry['colmap']
         else:
             colmap_rec = good_entry['colmap_binary']
+        process_image = True
+        if 'pose_only_in_colmap' in good_entry:
+            process_image = good_entry['pose_only_in_colmap'][i]
         K = np.array(K)
         R = np.array(R)
         t = np.array(t)
