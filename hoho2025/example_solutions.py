@@ -685,5 +685,6 @@ def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
     if (len(all_3d_vertices_clean) < 2) or len(connections_3d_clean) < 1:
         print (f'Not enough vertices or connections in the 3D vertices')
         return empty_solution()
-
-    return all_3d_vertices_clean, connections_3d_clean 
+    
+    connections_3d_clean = [(int(a), int(b)) for a, b in connections_3d_clean]
+    return all_3d_vertices_clean, connections_3d_clean
