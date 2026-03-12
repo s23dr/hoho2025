@@ -575,6 +575,9 @@ def fit_scale_robust_median(depth, sparse_depth, validity_mask=None):
     mask = mask & (depth < 50) & (sparse_depth < 50)
     X = depth[mask]
     Y = sparse_depth[mask]
+    if len(X) == 0 or np.all(X == 0):
+        print(f'Warning: fit_scale_robust_median has no valid points to fit; returning original depth.')
+        return 1.0, depth
     alpha = np.median(Y / X)
     depth_fitted = alpha * depth
     return alpha, depth_fitted
