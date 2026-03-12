@@ -569,10 +569,10 @@ def fit_scale_robust_median(depth, sparse_depth, validity_mask=None):
     the ratio toward large values.
     """
     if validity_mask is None:
-        mask = (sparse_depth != 0)
+        mask = (sparse_depth > 0)
     else:
-        mask = (sparse_depth != 0) & validity_mask
-    mask = mask & (depth < 50) & (sparse_depth < 50)
+        mask = (sparse_depth > 0) & validity_mask
+    mask = mask & (depth < 50) & (sparse_depth < 50) & (depth > 0)
     X = depth[mask]
     Y = sparse_depth[mask]
     if len(X) == 0 or np.all(X == 0):
