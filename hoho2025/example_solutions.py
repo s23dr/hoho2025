@@ -536,26 +536,29 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth, verbose=False):
         return np.zeros((H, W), dtype=np.float32), False, found_img
     
     points_xyz = np.array(points_xyz)  # (N, 3)
-    
-    # 3) Project each 3D point into the image using the version-agnostic helper.
+
+    # 3) Project all 3D points into the image in one vectorised batch.
+    # Per-point Python calls to _colmap_project_point would be too slow for
+    # large reconstructions; we replicate the same math on the full array.
+    R, t = _cam_matrix_from_image(found_img)
     cam = colmap_rec.cameras[found_img.camera_id]
-    uv = []
-    z_vals = []
-    for xyz in points_xyz:
-        result = _colmap_project_point(found_img, cam, xyz)
-        if result is None:
-            continue
-        (u_f, v_f), depth_z = result
-        u_i, v_i = int(round(u_f)), int(round(v_f))
-        if 0 <= u_i < W and 0 <= v_i < H:
-            uv.append((u_i, v_i))
-            z_vals.append(depth_z)
-    
-    uv = np.array(uv, dtype=int)     # shape (M,2)
-    z_vals = np.array(z_vals)        # shape (M,)
-    
+    K = cam.calibration_matrix()
+
+    p_cam = (points_xyz @ R.T) + t          # (N, 3) — camera-space coords
+    valid = p_cam[:, 2] > 0                  # discard points behind the camera
+    p_cam = p_cam[valid]
+
+    z = p_cam[:, 2]
+    u_f = p_cam[:, 0] / z * K[0, 0] + K[0, 2]
+    v_f = p_cam[:, 1] / z * K[1, 1] + K[1, 2]
+    u_i = np.round(u_f).astype(int)
+    v_i = np.round(v_f).astype(int)
+
+    in_bounds = (u_i >= 0) & (u_i < W) & (v_i >= 0) & (v_i < H)
+    u_i, v_i, z_vals = u_i[in_bounds], v_i[in_bounds], z[in_bounds]
+
     depth_out = np.zeros((H, W), dtype=np.float32)
-    depth_out[uv[:,1], uv[:,0]] = z_vals  # Note: uv = (u, v), so row = v, col = u
+    depth_out[v_i, u_i] = z_vals
     
     return depth_out, True, found_img
 
