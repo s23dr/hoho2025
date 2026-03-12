@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 import pycolmap
 from PIL import Image as PImage
-from scipy.spatial.distance import cdist
 
 from hoho2025.color_mappings import ade20k_color_mapping, gestalt_color_mapping
 
@@ -19,10 +18,10 @@ def empty_solution():
     
     
 def read_colmap_rec(colmap_data):
+    """Decode COLMAP reconstruction from the in-memory zip bytes stored in the dataset."""
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(io.BytesIO(colmap_data), "r") as zf:
-            zf.extractall(tmpdir)  # unpacks cameras.txt, images.txt, etc. to tmpdir
-        # Now parse with pycolmap
+            zf.extractall(tmpdir)
         rec = pycolmap.Reconstruction(tmpdir)
         return rec
 
@@ -58,14 +57,21 @@ def _colmap_project_point(img, cam, xyz):
     return (u, v), p_cam[2]
 
 def convert_entry_to_human_readable(entry):
+    """Decode raw dataset fields into usable Python objects.
+
+    COLMAP fields (zipped bytes) → pycolmap.Reconstruction.
+    Geometry fields (wf_vertices, wf_edges, K, R, t) → numpy arrays.
+    Note: K/R/t here are the dataset's BPO camera parameters, separate from
+    the camera model stored inside the COLMAP reconstruction.
+    """
     out = {}
     for k, v in entry.items():
-        if 'colmap' in k and k!= 'pose_only_in_colmap':
+        if 'colmap' in k and k != 'pose_only_in_colmap':
             out[k] = read_colmap_rec(v)
-        elif k in ['wf_vertices', 'wf_edges', 'K', 'R', 't', 'depth']:
+        elif k in ['wf_vertices', 'wf_edges', 'K', 'R', 't']:
             out[k] = np.array(v)
         else:
-            out[k]=v
+            out[k] = v
     out['__key__'] = entry['order_id']
     return out
 
@@ -107,116 +113,79 @@ def point_to_segment_dist(pt, seg_p1, seg_p2):
 
 
 def get_vertices_and_edges_from_segmentation(gest_seg_np, edge_th=25.0):
+    """Extract 2D wireframe vertices and edges from a gestalt segmentation map.
+
+    Gestalt marks vertex locations (apex, eave-end) as colored pixel blobs and
+    edge classes (eave, ridge, rake, valley) as thick painted strokes.
+
+    Vertex strategy: centroid of each connected blob → one vertex.
+    Edge strategy: fit a line to each connected stroke component, then connect
+    any two vertex blobs that both lie within `edge_th` pixels of that line.
+    We never use the fitted line's own endpoints as vertices.
     """
-    Identify apex and eave-end vertices, then detect lines for eave/ridge/rake/valley.
-    For each connected component, we do a line fit with cv2.fitLine, then measure
-    segment endpoints more robustly. We then associate apex points that are within
-    'edge_th' of the line segment. We record those apex–apex connections for edges
-    if at least 2 apexes lie near the same component line.
-    """
-    #--------------------------------------------------------------------------------
-    # Step A: Collect apex and eave_end vertices
-    #--------------------------------------------------------------------------------
     if not isinstance(gest_seg_np, np.ndarray):
         gest_seg_np = np.array(gest_seg_np)
+
+    # --- Collect vertices from blob centroids ---
     vertices = []
-    # Apex
-    apex_color = np.array(gestalt_color_mapping['apex'])
-    apex_mask = cv2.inRange(gest_seg_np, apex_color-0.5, apex_color+0.5)
-    if apex_mask.sum() > 0:
-        output = cv2.connectedComponentsWithStats(apex_mask, 8, cv2.CV_32S)
-        (numLabels, labels, stats, centroids) = output
-        stats, centroids = stats[1:], centroids[1:]  # skip background
-        for i in range(numLabels-1):
-            vert = {"xy": centroids[i], "type": "apex"}
-            vertices.append(vert)
+    for v_class, v_type in [('apex', 'apex'), ('eave_end_point', 'eave_end_point')]:
+        color = np.array(gestalt_color_mapping[v_class])
+        mask = cv2.inRange(gest_seg_np, color - 0.5, color + 0.5)
+        if mask.sum() == 0:
+            continue
+        _, _, _, centroids = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
+        for centroid in centroids[1:]:  # skip background label
+            vertices.append({"xy": centroid, "type": v_type})
 
-    # Eave end
-    eave_end_color = np.array(gestalt_color_mapping['eave_end_point'])
-    eave_end_mask = cv2.inRange(gest_seg_np, eave_end_color-0.5, eave_end_color+0.5)
-    if eave_end_mask.sum() > 0:
-        output = cv2.connectedComponentsWithStats(eave_end_mask, 8, cv2.CV_32S)
-        (numLabels, labels, stats, centroids) = output
-        stats, centroids = stats[1:], centroids[1:]
-        for i in range(numLabels-1):
-            vert = {"xy": centroids[i], "type": "eave_end_point"}
-            vertices.append(vert)
+    # Flat list of all vertex positions for distance queries below.
+    apex_pts = np.array([v['xy'] for v in vertices])
+    apex_idx_map = list(range(len(vertices)))
 
-    # Consolidate apex points as array:
-    apex_pts = []
-    apex_idx_map = []  # keep track of index in 'vertices'
-    for idx, v in enumerate(vertices):
-        apex_pts.append(v['xy'])
-        apex_idx_map.append(idx)
-    apex_pts = np.array(apex_pts)
-
+    # --- Collect edges by fitting lines to stroke components ---
     connections = []
     edge_classes = ['eave', 'ridge', 'rake', 'valley']
     for edge_class in edge_classes:
         edge_color = np.array(gestalt_color_mapping[edge_class])
-        mask_raw = cv2.inRange(gest_seg_np, edge_color-0.5, edge_color+0.5)
-        # Possibly do morphological open/close to avoid merges or small holes
-        kernel = np.ones((5, 5), np.uint8)  # smaller kernel to reduce over-merge
-        mask = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, kernel)
+        mask_raw = cv2.inRange(gest_seg_np, edge_color - 0.5, edge_color + 0.5)
+        # Morphological close bridges small gaps without over-merging distinct strokes.
+        mask = cv2.morphologyEx(mask_raw, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         if mask.sum() == 0:
             continue
 
-        # Connected components
-        output = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
-        (numLabels, labels, stats, centroids) = output
-        # skip the background
-        stats, centroids = stats[1:], centroids[1:]
-        label_indices = range(1, numLabels)
+        _, labels, _, _ = cv2.connectedComponentsWithStats(mask, 8, cv2.CV_32S)
 
-        # For each connected component, do a line fit
-        for lbl in label_indices:
+        for lbl in range(1, labels.max() + 1):
             ys, xs = np.where(labels == lbl)
             if len(xs) < 2:
                 continue
-            # Fit a line using cv2.fitLine
+
+            # Fit a line to the stroke pixels: returns (vx, vy, x0, y0).
             pts_for_fit = np.column_stack([xs, ys]).astype(np.float32)
-            # (vx, vy, x0, y0) = direction + a point on the line
-            line_params = cv2.fitLine(pts_for_fit, distType=cv2.DIST_L2, 
+            line_params = cv2.fitLine(pts_for_fit, distType=cv2.DIST_L2,
                                       param=0, reps=0.01, aeps=0.01)
             vx, vy, x0, y0 = line_params.ravel()
-            # We'll approximate endpoints by projecting (xs, ys) onto the line,
-            # then taking min and max in the 1D param along the line.
 
-            # param along the line = ( (x - x0)*vx + (y - y0)*vy )
-            proj = ( (xs - x0)*vx + (ys - y0)*vy )
-            proj_min, proj_max = proj.min(), proj.max()
-            p1 = np.array([x0 + proj_min*vx, y0 + proj_min*vy])
-            p2 = np.array([x0 + proj_max*vx, y0 + proj_max*vy])
+            # Recover the segment extent by projecting all stroke pixels onto the line
+            # and taking the extremes.
+            proj = (xs - x0) * vx + (ys - y0) * vy
+            p1 = np.array([x0 + proj.min() * vx, y0 + proj.min() * vy])
+            p2 = np.array([x0 + proj.max() * vx, y0 + proj.max() * vy])
 
-            #--------------------------------------------------------------------------------
-            # Step C: If apex points are within 'edge_th' of segment, they are connected
-            #--------------------------------------------------------------------------------
             if len(apex_pts) < 2:
                 continue
 
-            # Distance from each apex to the line segment
-            dists = np.array([
-                point_to_segment_dist(apex_pts[i], p1, p2)
-                for i in range(len(apex_pts))
-            ])
-
-            # Indices of apex points that are near
-            near_mask = (dists <= edge_th)
-            near_indices = np.where(near_mask)[0]
+            # Connect vertex blobs that lie close to this fitted segment.
+            dists = np.array([point_to_segment_dist(apex_pts[i], p1, p2)
+                              for i in range(len(apex_pts))])
+            near_indices = np.where(dists <= edge_th)[0]
             if len(near_indices) < 2:
                 continue
 
-            # Connect each pair among these near apex points
             for i in range(len(near_indices)):
-                for j in range(i+1, len(near_indices)):
-                    a_idx = near_indices[i]
-                    b_idx = near_indices[j]
-                    # 'a_idx' and 'b_idx' are indices in apex_pts / apex_idx_map
-                    vA = apex_idx_map[a_idx]
-                    vB = apex_idx_map[b_idx]
-                    # Store the connection using sorted indexing
-                    conn = tuple(sorted((vA, vB)))
-                    connections.append(conn)
+                for j in range(i + 1, len(near_indices)):
+                    vA = apex_idx_map[near_indices[i]]
+                    vB = apex_idx_map[near_indices[j]]
+                    connections.append(tuple(sorted((vA, vB))))
 
     return vertices, connections
 
@@ -254,49 +223,32 @@ def get_uv_depth(vertices: List[dict],
         Depth value chosen for each vertex.
     """
     
-    # Collect each vertex's (x, y)
     uv = np.array([vert['xy'] for vert in vertices], dtype=np.float32)
-    
-    # Convert to integer pixel coordinates (round or floor)
     uv_int = np.round(uv).astype(np.int32)
     H, W = depth_fitted.shape[:2]
-    
-    # Clip coordinates to stay within image bounds
     uv_int[:, 0] = np.clip(uv_int[:, 0], 0, W - 1)
     uv_int[:, 1] = np.clip(uv_int[:, 1], 0, H - 1)
-    
-    # Prepare output array of depths
+
     vertex_depth = np.zeros(len(vertices), dtype=np.float32)
     dense_count = 0
-    
+
     for i, (x_i, y_i) in enumerate(uv_int):
-        # Local region in [x_i - search_radius, x_i + search_radius]
         x0 = max(0, x_i - search_radius)
         x1 = min(W, x_i + search_radius + 1)
         y0 = max(0, y_i - search_radius)
         y1 = min(H, y_i + search_radius + 1)
-        
-        # Crop out the local window in sparse_depth
         region = sparse_depth[y0:y1, x0:x1]
-        
-        # Find all valid (non-zero) depths
-        valid_mask = (region > 0)
-        valid_y, valid_x = np.where(valid_mask)
-        
+        valid_y, valid_x = np.where(region > 0)
+
         if valid_y.size > 0:
-            # Compute global coordinates for each valid pixel
+            # Prefer the COLMAP sparse point nearest to the vertex over dense depth,
+            # since COLMAP depth is closer to GT metric while the dense map scale might be wrong.
             global_x = x0 + valid_x
             global_y = y0 + valid_y
-            
-            # Compute squared distance to center (x_i, y_i)
             dist_sq = (global_x - x_i)**2 + (global_y - y_i)**2
-            
-            # Find the nearest valid pixel
             min_idx = np.argmin(dist_sq)
-            nearest_depth = region[valid_y[min_idx], valid_x[min_idx]]
-            vertex_depth[i] = nearest_depth
+            vertex_depth[i] = region[valid_y[min_idx], valid_x[min_idx]]
         else:
-            # Fallback to the dense depth
             vertex_depth[i] = depth_fitted[y_i, x_i]
             dense_count += 1
     return uv, vertex_depth
@@ -408,48 +360,49 @@ def create_3d_wireframe_single_image(vertices: List[dict],
 
 
 def merge_vertices_3d(vert_edge_per_image, th=0.5):
-    '''Merge vertices that are close to each other in 3D space and are of same types'''
-    # Initialize structures to collect vertices and connections from all images
+    """Merge vertices across all views into a single consistent 3D vertex set.
+
+    The same physical corner is independently lifted to 3D from each image that
+    sees it, producing near-duplicate vertices. We merge any two vertices of the
+    same type whose 3D distance is within `th` metres.
+
+    Grouping is transitive: if A~B and B~C then all three collapse to one vertex
+    at their mean position.
+    """
     all_3d_vertices = []
     connections_3d = []
-    all_indexes = []
     cur_start = 0
     types = []
-    
-    # Combine vertices and update connection indices across all images
+
     for cimg_idx, (vertices, connections, vertices_3d) in vert_edge_per_image.items():
-        types += [int(v['type']=='apex') for v in vertices]
+        types += [int(v['type'] == 'apex') for v in vertices]
         all_3d_vertices.append(vertices_3d)
-        connections_3d+=[(x+cur_start,y+cur_start) for (x,y) in connections]
-        cur_start+=len(vertices_3d)
+        connections_3d += [(x + cur_start, y + cur_start) for (x, y) in connections]
+        cur_start += len(vertices_3d)
     all_3d_vertices = np.concatenate(all_3d_vertices, axis=0)
-    
-    # Calculate distance matrix between all vertices
-    distmat = cdist(all_3d_vertices, all_3d_vertices)
-    types = np.array(types).reshape(-1,1)
-    same_types = cdist(types, types)
-    
-    # Create mask for vertices that should be merged (close in space and same type)
-    mask_to_merge = (distmat <= th) & (same_types==0)
+
+    diff = all_3d_vertices[:, None, :] - all_3d_vertices[None, :, :]
+    distmat = np.sqrt((diff ** 2).sum(axis=-1))
+    types = np.array(types)
+    same_types_mask = (types[:, None] == types[None, :])
+    mask_to_merge = (distmat <= th) & same_types_mask
+
     new_vertices = []
     new_connections = []
-    
-    # Extract vertex indices to merge based on the mask
+
+    # Each row of mask_to_merge gives the set of vertices close to vertex i.
+    # Collect unique such sets, then union-find style: every vertex collects all
+    # other vertices it co-occurs with in any group.
     to_merge = sorted(list(set([tuple(a.nonzero()[0].tolist()) for a in mask_to_merge])))
-    
-    # Build groups of vertices to merge (transitive grouping)
     to_merge_final = defaultdict(list)
     for i in range(len(all_3d_vertices)):
         for j in to_merge:
             if i in j:
-                to_merge_final[i]+=j
-    
-    # Remove duplicates in each group
+                to_merge_final[i] += j
     for k, v in to_merge_final.items():
         to_merge_final[k] = list(set(v))
-    
-    # Create final merge groups without duplicates
-    already_there = set() 
+
+    already_there = set()
     merged = []
     for k, v in to_merge_final.items():
         if k in already_there:
@@ -457,18 +410,14 @@ def merge_vertices_3d(vert_edge_per_image, th=0.5):
         merged.append(v)
         for vv in v:
             already_there.add(vv)
-    
-    # Calculate new vertex positions (average of merged groups)
+
     old_idx_to_new = {}
-    count=0
-    for idxs in merged:
+    for count, idxs in enumerate(merged):
         new_vertices.append(all_3d_vertices[idxs].mean(axis=0))
         for idx in idxs:
             old_idx_to_new[idx] = count
-        count +=1
-    new_vertices=np.array(new_vertices)
-    
-    # Update connections to use new vertex indices
+    new_vertices = np.array(new_vertices)
+
     for conn in connections_3d:
         new_con = sorted((old_idx_to_new[conn[0]], old_idx_to_new[conn[1]]))
         if new_con[0] == new_con[1]:
@@ -608,17 +557,21 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth):
 
 
 def fit_scale_robust_median(depth, sparse_depth, validity_mask=None):
-    """
-    Fit a scale factor to the depth map using the median of the ratio of sparse to dense depth.
+    """Recover the absolute scale of a monocular depth map using COLMAP sparse points.
+
+    Monocular depth is scale-ambiguous; COLMAP gives metric depth at sparse locations.
+    We estimate a single scale factor alpha = median(sparse / dense) over pixels where
+    both are available. The 50 m cap excludes sky / background points that would skew
+    the ratio toward large values.
     """
     if validity_mask is None:
         mask = (sparse_depth != 0)
     else:
         mask = (sparse_depth != 0) & validity_mask
-    mask = mask & (depth <50) & (sparse_depth <50)
+    mask = mask & (depth < 50) & (sparse_depth < 50)
     X = depth[mask]
     Y = sparse_depth[mask]
-    alpha =np.median(Y/X)
+    alpha = np.median(Y / X)
     depth_fitted = alpha * depth
     return alpha, depth_fitted
     
@@ -630,20 +583,14 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg):
 
     Parameters
     ----------
-    depth : np.ndarray
-        Initial dense depth map (H, W).
+    depth : PIL.Image
+        Dense monocular depth map (pixel values in mm).
     colmap_rec : pycolmap.Reconstruction
-        COLMAP reconstruction data.
+        COLMAP reconstruction used to obtain metric sparse depth.
     img_id : str
-        Identifier for the current image within the COLMAP reconstruction.
-    K : np.ndarray
-        Camera intrinsic matrix (3x3).
-    R : np.ndarray
-        Camera rotation matrix (3x3).
-    t : np.ndarray
-        Camera translation vector (3,).
+        Substring matched against COLMAP image names to locate the right camera.
     ade20k_seg : PIL.Image
-        ADE20k segmentation map for the image.
+        ADE20k segmentation used to restrict scale fitting to the building region.
 
     Returns
     -------
@@ -673,17 +620,18 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg):
     return depth_fitted, depth_sparse, True, col_img
 
 
-def prune_too_far(all_3d_vertices, connections_3d, colmap_rec, th = 3.0):
+def prune_too_far(all_3d_vertices, connections_3d, colmap_rec, th=3.0):
+    """Remove vertices that have no SfM support within `th` metres.
+
+    Vertices lifted from noisy monocular depth with no nearby COLMAP point are
+    likely hallucinations; discarding them improves geometric accuracy.
     """
-    Prune vertices that are too far from sparse point cloud
-    
-    """
-    xyz_sfm=[]
+    xyz_sfm = []
     for k, v in colmap_rec.points3D.items():
         xyz_sfm.append(v.xyz)
     xyz_sfm = np.array(xyz_sfm)
-    distmat = cdist(all_3d_vertices, xyz_sfm)
-    mindist = distmat.min(axis=1)
+    diff = all_3d_vertices[:, None, :] - xyz_sfm[None, :, :]
+    mindist = np.sqrt((diff ** 2).sum(axis=-1)).min(axis=1)
     mask = mindist <= th
     all_3d_vertices_new = all_3d_vertices[mask]
     old_idx_survived = np.arange(len(all_3d_vertices))[mask]
@@ -699,24 +647,15 @@ def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
     """
     good_entry = convert_entry_to_human_readable(entry)
     vert_edge_per_image = {}
-    for i, (gest, depth, K, R, t, img_id, ade_seg) in enumerate(zip(good_entry['gestalt'],
-                                                good_entry['depth'], 
-                                                good_entry['K'],
-                                                good_entry['R'],
-                                                good_entry['t'],
+    for i, (gest, depth, img_id, ade_seg) in enumerate(zip(good_entry['gestalt'],
+                                                good_entry['depth'],
                                                 good_entry['image_ids'],
-                                                good_entry['ade'] # Added ade20k segmentation
+                                                good_entry['ade']
                                                 )):
         if 'colmap' in good_entry:
             colmap_rec = good_entry['colmap']
         else:
             colmap_rec = good_entry['colmap_binary']
-        process_image = True
-        if 'pose_only_in_colmap' in good_entry:
-            process_image = good_entry['pose_only_in_colmap'][i]
-        K = np.array(K)
-        R = np.array(R)
-        t = np.array(t)
         # Resize gestalt segmentation to match depth map size
         depth_size = (np.array(depth).shape[1], np.array(depth).shape[0]) # W, H
         gest_seg = gest.resize(depth_size)

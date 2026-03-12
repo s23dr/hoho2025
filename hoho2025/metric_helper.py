@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 import torch
 import trimesh
@@ -135,7 +134,8 @@ def compute_ap_metrics(pd_vertices, gt_vertices, thresh=25):
     if len(pd_vertices) == 0 or len(gt_vertices) == 0:
         return 0.0
 
-    dists = cdist(pd_vertices, gt_vertices)
+    diff = np.asarray(pd_vertices)[:, None, :] - np.asarray(gt_vertices)[None, :, :]
+    dists = np.sqrt((diff ** 2).sum(axis=-1))
     row_ind, col_ind = linear_sum_assignment(dists)
 
     tp = (dists[row_ind, col_ind] <= thresh).sum()

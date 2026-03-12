@@ -1,3 +1,33 @@
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "hoho2025"
+version = "0.2.2"
+description = "Tools and utilities for the HoHo Dataset and S23DR Competition"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Jack Langerman, Dmytro Mishkin, S23DR Organizing Team", email = "hoho@jackml.com" },
+]
+urls = { homepage = "https://github.com/s23dr/hoho2025" }
+dependencies = [
+    "datasets",
+    "huggingface-hub",
+    "ipywidgets",
+    "matplotlib",
+    "numpy",
+    "opencv-python",
+    "Pillow",
+    "plotly",
+    "pycolmap>=0.6",
+    "scipy",
+    "torch",
+    "trimesh",
+    "webdataset",
+    "manifold3d",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
