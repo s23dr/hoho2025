@@ -231,18 +231,23 @@ def get_vertices_and_edges_from_segmentation(gest_seg_np, edge_th=25.0):
             if len(apex_pts) < 2:
                 continue
 
-            # Connect vertex blobs that lie close to this fitted segment.
+            # Among vertex blobs within edge_th of the segment, connect the one
+            # nearest to each geometric endpoint — exactly one edge per component.
+            # All-pairs connection would create O(n²) spurious edges when several
+            # blobs lie near the same painted stroke.
             dists = np.array([point_to_segment_dist(apex_pts[i], p1, p2)
                               for i in range(len(apex_pts))])
             near_indices = np.where(dists <= edge_th)[0]
             if len(near_indices) < 2:
                 continue
 
-            for i in range(len(near_indices)):
-                for j in range(i + 1, len(near_indices)):
-                    vA = apex_idx_map[near_indices[i]]
-                    vB = apex_idx_map[near_indices[j]]
-                    connections.append(tuple(sorted((vA, vB))))
+            near_pts = apex_pts[near_indices]
+            idx_at_p1 = near_indices[np.argmin(np.linalg.norm(near_pts - p1, axis=1))]
+            idx_at_p2 = near_indices[np.argmin(np.linalg.norm(near_pts - p2, axis=1))]
+            if idx_at_p1 != idx_at_p2:
+                vA = apex_idx_map[idx_at_p1]
+                vB = apex_idx_map[idx_at_p2]
+                connections.append(tuple(sorted((vA, vB))))
 
     return vertices, connections
 
@@ -250,36 +255,37 @@ def get_vertices_and_edges_from_segmentation(gest_seg_np, edge_th=25.0):
 def get_uv_depth(vertices: List[dict],
                  depth_fitted: np.ndarray,
                  sparse_depth: np.ndarray,
-                 search_radius: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+                 search_radius: int = 10,
+                 proj_pts: np.ndarray = None,
+                 colmap_search_px: int = 50) -> Tuple[np.ndarray, np.ndarray]:
     """
-    For each vertex, returns a 2D array of (u,v) and a matching 1D array of depths.
-    
-    We attempt to use the sparse_depth if available in a local neighborhood:
-      1. For each vertex coordinate (x, y), define a local window in sparse_depth 
-         of size (2*search_radius + 1).
-      2. Collect all valid (nonzero) values in that window.
-      3. If any exist, we take the *closest* valid pixel's depth.
-      4. Otherwise, we use depth_fitted[y, x].
-    
+    For each vertex, return a 2D (u,v) array and a matching depth array.
+
+    Depth source priority:
+      1. Nearest projected COLMAP point within ``colmap_search_px`` pixels
+         (metric, no scale ambiguity).  Requires ``proj_pts`` (M×3 array of
+         u, v, z from ``get_sparse_depth``).
+      2. Nearest non-zero pixel in ``sparse_depth`` within ``search_radius``
+         pixels (fallback when ``proj_pts`` is not provided).
+      3. Scale-fitted dense depth at the vertex pixel (last resort).
+
     Parameters
     ----------
     vertices : List[dict]
         Each dict must have "xy" at least, e.g. {"xy": (x, y), ...}
     depth_fitted : np.ndarray
-        A 2D array (H, W), the dense (or corrected) depth for fallback.
+        (H, W) scale-corrected dense depth map (metres).
     sparse_depth : np.ndarray
-        A 2D array (H, W), mostly zeros except where accurate data is available.
+        (H, W) sparse depth map with COLMAP depths at projected pixel positions.
     search_radius : int
-        Pixel radius around the vertex in which to look for sparse depth values.
-    
-    Returns
-    -------
-    uv : np.ndarray of shape (N, 2)
-        2D float coordinates of each vertex (x, y).
-    vertex_depth : np.ndarray of shape (N,)
-        Depth value chosen for each vertex.
+        Pixel radius used for the sparse_depth fallback search.
+    proj_pts : np.ndarray, optional
+        (M, 3) array of (u, v, z) for all COLMAP points projected into this
+        image.  When provided, used as the primary depth source.
+    colmap_search_px : int
+        Maximum pixel distance to accept a COLMAP projected point as depth
+        for a vertex (used with ``proj_pts``).
     """
-    
     uv = np.array([vert['xy'] for vert in vertices], dtype=np.float32)
     uv_int = np.round(uv).astype(np.int32)
     H, W = depth_fitted.shape[:2]
@@ -287,23 +293,36 @@ def get_uv_depth(vertices: List[dict],
     uv_int[:, 1] = np.clip(uv_int[:, 1], 0, H - 1)
 
     vertex_depth = np.zeros(len(vertices), dtype=np.float32)
+    assigned = np.zeros(len(vertices), dtype=bool)
     dense_count = 0
 
+    # --- Priority 1: nearest projected COLMAP point (vectorised over all vertices) ---
+    if proj_pts is not None and len(proj_pts) > 0:
+        # (N, M) squared pixel distances from each vertex to each COLMAP point.
+        diff_u = uv_int[:, 0:1].astype(np.float32) - proj_pts[:, 0]  # (N, M)
+        diff_v = uv_int[:, 1:2].astype(np.float32) - proj_pts[:, 1]  # (N, M)
+        dist_sq = diff_u ** 2 + diff_v ** 2
+        nearest_idx = np.argmin(dist_sq, axis=1)                      # (N,)
+        nearest_dist_sq = dist_sq[np.arange(len(vertices)), nearest_idx]
+        found = nearest_dist_sq <= colmap_search_px ** 2
+        vertex_depth[found] = proj_pts[nearest_idx[found], 2]
+        assigned = found
+
+    # --- Priority 2 / 3: sparse depth map → scale-fitted dense depth ---
     for i, (x_i, y_i) in enumerate(uv_int):
+        if assigned[i]:
+            continue
         x0 = max(0, x_i - search_radius)
         x1 = min(W, x_i + search_radius + 1)
         y0 = max(0, y_i - search_radius)
         y1 = min(H, y_i + search_radius + 1)
         region = sparse_depth[y0:y1, x0:x1]
         valid_y, valid_x = np.where(region > 0)
-
         if valid_y.size > 0:
-            # Prefer the COLMAP sparse point nearest to the vertex over dense depth,
-            # since COLMAP depth is closer to GT metric while the dense map scale might be wrong.
             global_x = x0 + valid_x
             global_y = y0 + valid_y
-            dist_sq = (global_x - x_i)**2 + (global_y - y_i)**2
-            min_idx = np.argmin(dist_sq)
+            dist_sq_local = (global_x - x_i) ** 2 + (global_y - y_i) ** 2
+            min_idx = np.argmin(dist_sq_local)
             vertex_depth[i] = region[valid_y[min_idx], valid_x[min_idx]]
         else:
             vertex_depth[i] = depth_fitted[y_i, x_i]
@@ -405,12 +424,13 @@ def create_3d_wireframe_single_image(vertices: List[dict],
         return np.empty((0, 3))
 
     # Get fitted dense depth and sparse depth
-    depth_fitted, depth_sparse, found_sparse, col_img = get_fitted_dense_depth(
+    depth_fitted, depth_sparse, found_sparse, col_img, proj_pts = get_fitted_dense_depth(
         depth, colmap_rec, img_id, ade_seg, verbose=verbose
     )
 
     # Get UV coordinates and depth for each vertex
-    uv, depth_vert = get_uv_depth(vertices, depth_fitted, depth_sparse, 10)
+    uv, depth_vert = get_uv_depth(vertices, depth_fitted, depth_sparse,
+                                   search_radius=10, proj_pts=proj_pts)
 
     # Backproject to 3D
     vertices_3d = project_vertices_to_3d(uv, depth_vert, col_img, colmap_rec=colmap_rec)
@@ -432,11 +452,19 @@ def merge_vertices_3d(vert_edge_per_image, th=0.5):
     connections_3d = []
     cur_start = 0
     types = []
+    # Track which image each global vertex came from, and which images produced each edge.
+    vertex_src_img = {}                    # global_old_idx → image index
+    edge_src_imgs = defaultdict(set)       # sorted global old pair → set of image indices
 
     for cimg_idx, (vertices, connections, vertices_3d) in vert_edge_per_image.items():
         types += [int(v['type'] == 'apex') for v in vertices]
         all_3d_vertices.append(vertices_3d)
-        connections_3d += [(x + cur_start, y + cur_start) for (x, y) in connections]
+        for local_idx in range(len(vertices_3d)):
+            vertex_src_img[cur_start + local_idx] = cimg_idx
+        for (x, y) in connections:
+            gx, gy = x + cur_start, y + cur_start
+            edge_src_imgs[tuple(sorted((gx, gy)))].add(cimg_idx)
+            connections_3d.append((gx, gy))
         cur_start += len(vertices_3d)
     all_3d_vertices = np.concatenate(all_3d_vertices, axis=0)
 
@@ -471,19 +499,31 @@ def merge_vertices_3d(vert_edge_per_image, th=0.5):
             already_there.add(vv)
 
     old_idx_to_new = {}
+    vertex_view_count = []
     for count, idxs in enumerate(merged):
         new_vertices.append(all_3d_vertices[idxs].mean(axis=0))
+        # Number of unique images that contributed any vertex in this merged group.
+        imgs = {vertex_src_img[i] for i in idxs if i in vertex_src_img}
+        vertex_view_count.append(len(imgs))
         for idx in idxs:
             old_idx_to_new[idx] = count
     new_vertices = np.array(new_vertices)
+    vertex_view_count = np.array(vertex_view_count, dtype=int)
 
+    # For each final edge, accumulate the set of images that produced any old edge
+    # that maps to it. Using a dict naturally deduplicates edges.
+    new_edge_img_sets = defaultdict(set)
     for conn in connections_3d:
-        new_con = sorted((old_idx_to_new[conn[0]], old_idx_to_new[conn[1]]))
-        if new_con[0] == new_con[1]:
+        new_a = old_idx_to_new.get(conn[0])
+        new_b = old_idx_to_new.get(conn[1])
+        if new_a is None or new_b is None or new_a == new_b:
             continue
-        if new_con not in new_connections:
-            new_connections.append(new_con)
-    return new_vertices, new_connections
+        new_key = tuple(sorted((new_a, new_b)))
+        new_edge_img_sets[new_key] |= edge_src_imgs[tuple(sorted(conn))]
+
+    new_connections = list(new_edge_img_sets.keys())
+    edge_vote_count = {k: len(v) for k, v in new_edge_img_sets.items()}
+    return new_vertices, new_connections, vertex_view_count, edge_vote_count
 
 
 def prune_not_connected(all_3d_vertices, connections_3d, keep_largest=True):
@@ -580,7 +620,7 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth, verbose=False):
     if found_img is None:
         if verbose:
             print(f"Image substring {img_id_substring} not found in COLMAP.")
-        return np.zeros((H, W), dtype=np.float32), False, None
+        return np.zeros((H, W), dtype=np.float32), False, None, None
     
     # 2) Gather 3D points that this image sees
     points_xyz = []
@@ -590,7 +630,7 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth, verbose=False):
     if not points_xyz:
         if verbose:
             print(f"No 3D points associated with {found_img.name}.")
-        return np.zeros((H, W), dtype=np.float32), False, found_img
+        return np.zeros((H, W), dtype=np.float32), False, found_img, None
     
     points_xyz = np.array(points_xyz)  # (N, 3)
 
@@ -616,8 +656,11 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth, verbose=False):
 
     depth_out = np.zeros((H, W), dtype=np.float32)
     depth_out[v_i, u_i] = z_vals
-    
-    return depth_out, True, found_img
+
+    # Also return projected points as (u, v, z) for direct nearest-neighbour depth
+    # lookup in get_uv_depth — avoids relying on the sparse depth map's pixel grid.
+    proj_pts = np.column_stack([u_i, v_i, z_vals]).astype(np.float32)  # (M, 3)
+    return depth_out, True, found_img, proj_pts
 
 
 def fit_scale_robust_median(depth, sparse_depth, validity_mask=None):
@@ -669,13 +712,13 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg, verbose=False)
         True if sparse depth points were found for this image, False otherwise.
     """
     depth_np = np.array(depth) / 1000. # Convert mm to meters if needed
-    depth_sparse, found_sparse, col_img = get_sparse_depth(colmap_rec, img_id, depth_np, verbose=verbose)
+    depth_sparse, found_sparse, col_img, proj_pts = get_sparse_depth(colmap_rec, img_id, depth_np, verbose=verbose)
     
     if not found_sparse:
         if verbose:
             print(f'No sparse depth found for image {img_id}')
         # Return original (meter-scaled) depth if no sparse data
-        return depth_np, np.zeros_like(depth_np), False, None
+        return depth_np, np.zeros_like(depth_np), False, None, None
 
     # Get house mask to focus fitting on relevant areas
     house_mask = get_house_mask(ade20k_seg)
@@ -684,9 +727,7 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg, verbose=False)
     k, depth_fitted = fit_scale_robust_median(depth_np, depth_sparse, validity_mask=house_mask)
     if verbose:
         print(f"Fitted depth scale k={k:.4f} for image {img_id}")
-    depth_fitted = depth_np * house_mask.astype(np.float32)
-    depth_sparse = depth_sparse * house_mask.astype(np.float32)
-    return depth_fitted, depth_sparse, True, col_img
+    return depth_fitted, depth_sparse, True, col_img, proj_pts
 
 
 def prune_too_far(all_3d_vertices, connections_3d, colmap_rec, th=3.0):
@@ -758,9 +799,22 @@ def predict_wireframe(entry, verbose: bool = False) -> Tuple[np.ndarray, List[in
         vert_edge_per_image[i] = vertices, connections, vertices_3d
     
     # Merge vertices from all images
-    all_3d_vertices, connections_3d = merge_vertices_3d(vert_edge_per_image, 0.5)
-    all_3d_vertices_clean, connections_3d_clean = prune_not_connected(all_3d_vertices, connections_3d, keep_largest=False)
-    all_3d_vertices_clean, connections_3d_clean = prune_too_far(all_3d_vertices_clean, connections_3d_clean, colmap_rec, th=4.0)
+    all_3d_vertices, connections_3d, vertex_view_count, edge_vote_count = merge_vertices_3d(vert_edge_per_image, 0.5)
+
+    # Lenient cross-view filter: drop a single-view edge only when both its endpoints
+    # are confirmed from multiple views (meaning the edge is likely a per-image
+    # hallucination, not a structure only visible from one angle).
+    connections_3d = [
+        conn for conn in connections_3d
+        if edge_vote_count.get(conn, 1) >= 2
+        or min(vertex_view_count[conn[0]], vertex_view_count[conn[1]]) < 2
+    ]
+
+    # Prune order: remove SfM-unsupported vertices first, then isolated ones.
+    # A vertex may only be connected through another that will be pruned; doing
+    # SfM pruning first avoids keeping dangling edges into removed vertices.
+    all_3d_vertices_clean, connections_3d_clean = prune_too_far(all_3d_vertices, connections_3d, colmap_rec, th=4.0)
+    all_3d_vertices_clean, connections_3d_clean = prune_not_connected(all_3d_vertices_clean, connections_3d_clean, keep_largest=False)
 
     if (len(all_3d_vertices_clean) < 2) or len(connections_3d_clean) < 1:
         if verbose:
