@@ -188,7 +188,6 @@ def plot_camera_colmap(
         name: Optional[str] = None,
         **kwargs):
     """Plot a camera frustum from PyCOLMAP objects"""
-    # Use camera intrinsics method if available, otherwise fallback to params
     intr = camera.calibration_matrix()
     if intr[0][0] > 5000:
         print("Bad camera")
@@ -196,10 +195,13 @@ def plot_camera_colmap(
     cfw = image.cam_from_world
     if callable(cfw):
         cfw = cfw()
+    # plot_camera expects camera-to-world R and camera center in world space,
+    # so invert the cam_from_world pose before passing.
+    world_t_camera = cfw.inverse()
     plot_camera(
         fig,
-        cfw.rotation.matrix(),  # Use rotation matrix method (World-to-Camera)
-        cfw.translation,  # Use camera center in world coordinates
+        world_t_camera.rotation.matrix(),
+        world_t_camera.translation,
         intr,
         name=name or str(image.name),
         **kwargs)
