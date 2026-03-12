@@ -28,8 +28,10 @@ def read_colmap_rec(colmap_data):
 
 
 def _cam_matrix_from_image(img):
-    """Return (R 3×3, t 3) from a pycolmap.Image, compatible with all pycolmap versions."""
+    """Return (R 3x3, t 3) from a pycolmap.Image, compatible with all pycolmap versions."""
     cfW = img.cam_from_world
+    if callable(cfW):
+        cfW = cfW() 
     try:
         R = cfW.rotation.matrix()
         t = cfW.translation
