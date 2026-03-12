@@ -21,7 +21,7 @@ dependencies = [
     "opencv-python",
     "Pillow",
     "plotly",
-    "pycolmap>=0.6",
+    "pycolmap>=3.13",
     "scipy",
     "torch",
     "trimesh",

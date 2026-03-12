@@ -114,12 +114,18 @@ def importt(module_name, as_name=None):
             
     
 def prepare_submission():
-    # Download packages from requirements.txt 
-    if Path('requirements.txt').exists():
-        print('downloading packages from requirements.txt')
-        Path('packages').mkdir(exist_ok=True)
-        with open('requirements.txt') as f:
-            packages = f.readlines()
+    # Read dependencies from pyproject.toml and download them for offline submission.
+    import tomllib
+    pyproject = Path(__file__).parent.parent / 'pyproject.toml'
+    if not pyproject.exists():
+        print('pyproject.toml not found; skipping package download.')
+    else:
+        with open(pyproject, 'rb') as f:
+            data = tomllib.load(f)
+        packages = data.get('project', {}).get('dependencies', [])
+        if packages:
+            print('downloading packages from pyproject.toml')
+            Path('packages').mkdir(exist_ok=True)
             for p in packages:
                 download_package(p.strip())
                 
