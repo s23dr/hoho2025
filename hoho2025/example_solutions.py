@@ -314,7 +314,8 @@ def create_3d_wireframe_single_image(vertices: List[dict],
                                      depth: PImage,
                                      colmap_rec: pycolmap.Reconstruction,
                                      img_id: str,
-                                     ade_seg: PImage) -> np.ndarray:
+                                     ade_seg: PImage,
+                                     verbose: bool = False) -> np.ndarray:
     """
     Processes a single image view to generate 3D vertex coordinates from existing 2D vertices/edges.
 
@@ -342,12 +343,13 @@ def create_3d_wireframe_single_image(vertices: List[dict],
     # Check if initial vertices/connections are valid
     if (len(vertices) < 2) or (len(connections) < 1):
         # This case should ideally be handled before calling, but good to double check.
-        print(f'Warning: create_3d_wireframe_single_image called with insufficient vertices/connections for image {img_id}')
+        if verbose:
+            print(f'Warning: create_3d_wireframe_single_image called with insufficient vertices/connections for image {img_id}')
         return np.empty((0, 3))
 
     # Get fitted dense depth and sparse depth
     depth_fitted, depth_sparse, found_sparse, col_img = get_fitted_dense_depth(
-        depth, colmap_rec, img_id, ade_seg
+        depth, colmap_rec, img_id, ade_seg, verbose=verbose
     )
 
     # Get UV coordinates and depth for each vertex
@@ -504,7 +506,7 @@ def prune_not_connected(all_3d_vertices, connections_3d, keep_largest=True):
     new_conns = list(set([tuple(sorted(c)) for c in new_conns]))
     return new_vertices, new_conns
 
-def get_sparse_depth(colmap_rec, img_id_substring, depth):
+def get_sparse_depth(colmap_rec, img_id_substring, depth, verbose=False):
     """
     Return a sparse depth map for the COLMAP image whose name contains
     `img_id_substring`. The output is an array of shape `depth_shape` (H,W),
@@ -519,7 +521,8 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth):
             found_img = col_img
             break
     if found_img is None:
-        print(f"Image substring {img_id_substring} not found in COLMAP.")
+        if verbose:
+            print(f"Image substring {img_id_substring} not found in COLMAP.")
         return np.zeros((H, W), dtype=np.float32), False, None
     
     # 2) Gather 3D points that this image sees
@@ -528,7 +531,8 @@ def get_sparse_depth(colmap_rec, img_id_substring, depth):
         if found_img.has_point3D(pid):
             points_xyz.append(p3D.xyz)  # world coords
     if not points_xyz:
-        print(f"No 3D points associated with {found_img.name}.")
+        if verbose:
+            print(f"No 3D points associated with {found_img.name}.")
         return np.zeros((H, W), dtype=np.float32), False, found_img
     
     points_xyz = np.array(points_xyz)  # (N, 3)
@@ -576,7 +580,7 @@ def fit_scale_robust_median(depth, sparse_depth, validity_mask=None):
     return alpha, depth_fitted
     
 
-def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg):
+def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg, verbose=False):
     """
     Gets sparse depth from COLMAP, computes a house mask, fits dense depth to sparse 
     depth within the mask, and returns the fitted dense depth.
@@ -602,10 +606,11 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg):
         True if sparse depth points were found for this image, False otherwise.
     """
     depth_np = np.array(depth) / 1000. # Convert mm to meters if needed
-    depth_sparse, found_sparse, col_img = get_sparse_depth(colmap_rec, img_id, depth_np)
+    depth_sparse, found_sparse, col_img = get_sparse_depth(colmap_rec, img_id, depth_np, verbose=verbose)
     
     if not found_sparse:
-        print(f'No sparse depth found for image {img_id}')
+        if verbose:
+            print(f'No sparse depth found for image {img_id}')
         # Return original (meter-scaled) depth if no sparse data
         return depth_np, np.zeros_like(depth_np), False, None
 
@@ -614,7 +619,8 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg):
     
     # Fit dense depth to sparse depth (scale only), using only points within the house mask
     k, depth_fitted = fit_scale_robust_median(depth_np, depth_sparse, validity_mask=house_mask)
-    print(f"Fitted depth scale k={k:.4f} for image {img_id}")
+    if verbose:
+        print(f"Fitted depth scale k={k:.4f} for image {img_id}")
     #depth_fitted = depth_np# * house_mask.astype(np.float32)
     depth_sparse = depth_sparse# * house_mask.astype(np.float32)
     return depth_fitted, depth_sparse, True, col_img
@@ -641,7 +647,7 @@ def prune_too_far(all_3d_vertices, connections_3d, colmap_rec, th=3.0):
     return all_3d_vertices_new, connections_3d_new
 
 
-def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
+def predict_wireframe(entry, verbose: bool = False) -> Tuple[np.ndarray, List[int]]:
     """
     Predict 3D wireframe from a dataset entry.
     """
@@ -666,13 +672,14 @@ def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
         
         # Check if we have enough to proceed
         if (len(vertices) < 2) or (len(connections) < 1):
-            print(f'Not enough vertices or connections found in image {i}, skipping.')
+            if verbose:
+                print(f'Not enough vertices or connections found in image {i}, skipping.')
             vert_edge_per_image[i] = [], [], np.empty((0, 3))
             continue
             
         # Call the refactored function to get 3D points
         vertices_3d = create_3d_wireframe_single_image(
-            vertices, connections, depth, colmap_rec, img_id, ade_seg
+            vertices, connections, depth, colmap_rec, img_id, ade_seg, verbose=verbose
         )
         # Store original 2D vertices, connections, and computed 3D points
         vert_edge_per_image[i] = vertices, connections, vertices_3d
@@ -683,7 +690,8 @@ def predict_wireframe(entry) -> Tuple[np.ndarray, List[int]]:
     all_3d_vertices_clean, connections_3d_clean  = prune_too_far(all_3d_vertices_clean, connections_3d_clean, colmap_rec, th = 4.0)
     
     if (len(all_3d_vertices_clean) < 2) or len(connections_3d_clean) < 1:
-        print (f'Not enough vertices or connections in the 3D vertices')
+        if verbose:
+            print(f'Not enough vertices or connections in the 3D vertices')
         return empty_solution()
     
     connections_3d_clean = [(int(a), int(b)) for a, b in connections_3d_clean]
