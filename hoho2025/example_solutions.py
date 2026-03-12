@@ -76,6 +76,63 @@ def convert_entry_to_human_readable(entry):
     return out
 
 
+# ADE20K classes that are never part of a building wireframe.
+_BACKGROUND_CLASSES_ADE20K = [
+    'sky',
+    'tree',
+    'grass',
+    'plant;flora;plant;life',
+    'palm;palm;tree',
+]
+
+
+def get_background_mask(ade20k_seg_np):
+    """Return a boolean (H, W) mask that is True for sky / vegetation pixels."""
+    mask = np.zeros(ade20k_seg_np.shape[:2], dtype=bool)
+    for cls in _BACKGROUND_CLASSES_ADE20K:
+        color = np.array(ade20k_color_mapping[cls])
+        mask |= cv2.inRange(ade20k_seg_np, color - 0.5, color + 0.5).astype(bool)
+    return mask
+
+
+def filter_vertices_by_background(vertices, connections, ade20k_seg_np):
+    """Drop 2D vertices whose centroids land on sky or vegetation pixels.
+
+    Gestalt sometimes places apex/eave-end blobs on background regions due to
+    colour bleed or segmentation errors. Removing them before 3D lifting avoids
+    lifting spurious depth values from non-building surfaces.
+    Connections that reference a removed vertex are also dropped, and the
+    remaining vertex indices are remapped to stay contiguous.
+    """
+    if not vertices:
+        return vertices, connections
+
+    H, W = ade20k_seg_np.shape[:2]
+    bg_mask = get_background_mask(ade20k_seg_np)
+
+    keep = []
+    for i, v in enumerate(vertices):
+        x = int(round(v['xy'][0]))
+        y = int(round(v['xy'][1]))
+        x = np.clip(x, 0, W - 1)
+        y = np.clip(y, 0, H - 1)
+        if not bg_mask[y, x]:
+            keep.append(i)
+
+    if len(keep) == len(vertices):
+        return vertices, connections
+
+    keep_set = set(keep)
+    old_to_new = {old: new for new, old in enumerate(keep)}
+    new_vertices = [vertices[i] for i in keep]
+    new_connections = [
+        (old_to_new[a], old_to_new[b])
+        for a, b in connections
+        if a in keep_set and b in keep_set
+    ]
+    return new_vertices, new_connections
+
+
 def get_house_mask(ade20k_seg):
     """
     Get a mask of the house in the ADE20K segmentation map.
@@ -675,7 +732,12 @@ def predict_wireframe(entry, verbose: bool = False) -> Tuple[np.ndarray, List[in
         
         # Get 2D vertices and edges first
         vertices, connections = get_vertices_and_edges_from_segmentation(gest_seg_np, edge_th=10.)
-        
+
+        # Drop vertices that fall on sky / vegetation in the ADE20K map.
+        # ADE20K is resized to depth_size so pixel coordinates align with gestalt.
+        ade_seg_np = np.array(ade_seg.resize(depth_size)).astype(np.uint8)
+        vertices, connections = filter_vertices_by_background(vertices, connections, ade_seg_np)
+
         # Check if we have enough to proceed
         if (len(vertices) < 2) or (len(connections) < 1):
             if verbose:
