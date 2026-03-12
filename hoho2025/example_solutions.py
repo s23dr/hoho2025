@@ -684,8 +684,8 @@ def get_fitted_dense_depth(depth, colmap_rec, img_id, ade20k_seg, verbose=False)
     k, depth_fitted = fit_scale_robust_median(depth_np, depth_sparse, validity_mask=house_mask)
     if verbose:
         print(f"Fitted depth scale k={k:.4f} for image {img_id}")
-    #depth_fitted = depth_np# * house_mask.astype(np.float32)
-    depth_sparse = depth_sparse# * house_mask.astype(np.float32)
+    depth_fitted = depth_np * house_mask.astype(np.float32)
+    depth_sparse = depth_sparse * house_mask.astype(np.float32)
     return depth_fitted, depth_sparse, True, col_img
 
 
