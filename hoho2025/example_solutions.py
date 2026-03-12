@@ -77,12 +77,13 @@ def convert_entry_to_human_readable(entry):
 
 
 # ADE20K classes that are never part of a building wireframe.
+# This is good idea in theory, but the results are not good -- too many vertices are removed.
 _BACKGROUND_CLASSES_ADE20K = [
-    'sky',
-    'tree',
+  #   'sky',
+  #  'tree',
     'grass',
-    'plant;flora;plant;life',
-    'palm;palm;tree',
+  #  'plant;flora;plant;life',
+  #  'palm;palm;tree',
 ]
 
 
@@ -804,11 +805,11 @@ def predict_wireframe(entry, verbose: bool = False) -> Tuple[np.ndarray, List[in
     # Lenient cross-view filter: drop a single-view edge only when both its endpoints
     # are confirmed from multiple views (meaning the edge is likely a per-image
     # hallucination, not a structure only visible from one angle).
-    connections_3d = [
-        conn for conn in connections_3d
-        if edge_vote_count.get(conn, 1) >= 2
-        or min(vertex_view_count[conn[0]], vertex_view_count[conn[1]]) < 2
-    ]
+    #connections_3d = [
+    #    conn for conn in connections_3d
+    #    if edge_vote_count.get(conn, 1) >= 2
+    #    or min(vertex_view_count[conn[0]], vertex_view_count[conn[1]]) < 2
+    #]
 
     # Prune order: remove SfM-unsupported vertices first, then isolated ones.
     # A vertex may only be connected through another that will be pruned; doing
