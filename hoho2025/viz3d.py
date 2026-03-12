@@ -193,11 +193,13 @@ def plot_camera_colmap(
     if intr[0][0] > 5000:
         print("Bad camera")
         return
-    world_t_camera = image.cam_from_world.inverse()
+    cfw = image.cam_from_world
+    if callable(cfw):
+        cfw = cfw()
     plot_camera(
         fig,
-        world_t_camera.rotation.matrix(),  # Use rotation matrix method (World-to-Camera)
-        world_t_camera.translation,  # Use camera center in world coordinates
+        cfw.rotation.matrix(),  # Use rotation matrix method (World-to-Camera)
+        cfw.translation,  # Use camera center in world coordinates
         intr,
         name=name or str(image.name),
         **kwargs)
@@ -607,8 +609,11 @@ def plot_depth_and_segmentation_in_3d_colmap(
         img_id = parts[1] if len(parts) >= 2 else img.name.split('.')[0]
         cam    = rec.cameras[img.camera_id]
         K_c    = cam.calibration_matrix()
-        R_c    = img.cam_from_world.rotation.matrix()
-        t_c    = img.cam_from_world.translation
+        cfw    = img.cam_from_world
+        if callable(cfw):
+            cfw = cfw()
+        R_c    = cfw.rotation.matrix()
+        t_c    = cfw.translation
         colmap_cam_map[img_id] = (K_c, R_c, t_c)
 
     # Non-pose-only image IDs in sorted order — these have depth/ade entries.
